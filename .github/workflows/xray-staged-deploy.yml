@@ -1,0 +1,50 @@
+name: Deploy X-Ray Mirror staged site
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.xray-staging/**'
+permissions:
+  contents: write
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Rebuild original files and check SHA-256
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+          data = json.loads(Path('.xray-staging/manifest.json').read_text())
+          files = data['files']
+          wanted = {'index.html', '.nojekyll',
+              'assets/pose_landmarker_full.task', 'assets/hand_landmarker.task',
+              'assets/pose_landmarker_lite.task', 'assets/vision_wasm_internal.wasm',
+              'assets/face_landmarker.task', 'assets/vision_wasm_nosimd_internal.wasm',
+              'assets/skeleton.glb', 'assets/vision_wasm_nosimd_internal.js'}
+          assert {f['path'] for f in files} == wanted, 'Unexpected ZIP file set'
+          for item in files:
+              raw = b''.join((Path('.xray-staging/parts') / name).read_bytes() for name in item['parts'])
+              assert len(raw) == item['size'], item['path']
+              assert hashlib.sha256(raw).hexdigest() == item['sha256'], item['path']
+              dest = Path(item['path'])
+              dest.parent.mkdir(parents=True, exist_ok=True)
+              dest.write_bytes(raw)
+              print('SHA256 OK', dest, len(raw))
+          assert len(list(Path('assets').iterdir())) == 8, 'Incorrect asset count'
+          PY
+      - name: Remove staging files and commit exact site
+        shell: bash
+        run: |
+          rm -rf .xray-staging
+          rm -f .github/workflows/xray-staged-deploy.yml
+          rmdir .github/workflows .github 2>/dev/null || true
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Deploy X-Ray Mirror site and MediaPipe assets"
+          git push origin HEAD:main
