@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="theme-color" content="#09110f">
 <meta name="referrer" content="no-referrer">
-<meta http-equiv="Content-Security-Policy" content="script-src 'unsafe-inline' 'wasm-unsafe-eval' blob:; style-src 'unsafe-inline'; connect-src blob: https://cdn.jsdelivr.net https://unpkg.com https://storage.googleapis.com https://raw.githubusercontent.com; img-src data: blob:; media-src blob:; worker-src blob:; object-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'">
+<meta http-equiv="Content-Security-Policy" content="script-src 'unsafe-inline' 'wasm-unsafe-eval' blob:; style-src 'unsafe-inline'; connect-src 'self' blob: https://cdn.jsdelivr.net https://unpkg.com https://storage.googleapis.com https://raw.githubusercontent.com; img-src data: blob:; media-src blob:; worker-src blob:; object-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'">
 <title>Anatomy Mirror Studio</title>
 <style>
 :root{color-scheme:dark;--bg:#080e0e;--panel:#111b19;--panel2:#17231f;--line:#2a3a34;--text:#edf5ee;--muted:#9bac9f;--green:#b6efba;--green2:#71c89a;--gold:#e5bd72;--danger:#ff9b92;--r:18px}
@@ -53410,7 +53410,9 @@ const META = JSON.parse($("meshmeta").textContent);
 // ------------------------------ settings ------------------------------
 const DEFAULTS = { skull: true, brain: false, muscles: false, eyes: true, outline: true, hands: true, arms: true, torso: true, legs: true,
                    style: "xray", bright: 1, real: 0.12, feather: 0.2, reveal: "whole", cut: 0.5, showdata: false,
-                   fs: 1, fw: 1, fh: 1, fd: 1, fx: 0, fy: 0, fz: 0, labels: false, smooth: 0.45, poseq: "full" };
+                   fs: 1, fw: 1, fh: 1, fd: 1, fx: 0, fy: 0, fz: 0, labels: false, smooth: 0.45,
+                   // phones and tablets get the lighter body model by default; it can be changed under "Camera, tracking & help"
+                   poseq: (navigator.maxTouchPoints > 0 && matchMedia("(pointer: coarse)").matches) ? "lite" : "full" };
 let S = Object.assign({}, DEFAULTS);
 try { Object.assign(S, JSON.parse(localStorage.getItem("xr_settings") || "{}")); } catch (e) {}
 function save() { try { localStorage.setItem("xr_settings", JSON.stringify(S)); } catch (e) {} }
@@ -54583,16 +54585,33 @@ const WASM_SIMD_HASH = "f82a8e6c05e08a44cc9f9e7ec5f845935bcbb1b1500ebe8c2f4812fb
 const WASM_NOSIMD_HASH384 = "4TZi4A8vwDwAdUuCp/TZFPzVRWERk0T4QnOxMCMY9qFnzvDnndjdiIHzBZ0xu/oB";
 const LOADER_NOSIMD_HASH384 = "BQunnb2RrWwTlqL/gGpV1KOoZnLcsIb8uWDD21uhLVtQuKG0HsmfmhlDSDjnA1iw";
 let networkLocked=false, runtimeBlobUrls=[];
+// Files are looked for first in an "assets" folder next to this page (fast when the page is hosted together with them),
+// then at their public addresses. Every copy must match the same fingerprint, wherever it comes from.
+const dl = { total: 0, done: 0, files: 0 };
+function showDownload() { if (dl.total > 0) setStatus("Downloading the tracking and anatomy models… " + (dl.done / 1048576).toFixed(0) + " of about " + (dl.total / 1048576).toFixed(0) + " MB"); }
+async function readWithProgress(response) {
+  const size = Number(response.headers.get("content-length")) || 0, reader = response.body?.getReader?.();
+  if (!reader) { const b = await response.arrayBuffer(); dl.done += b.byteLength; showDownload(); return b; }
+  dl.total += size; const parts = []; let got = 0;
+  try {
+    for (;;) { const { done, value } = await reader.read(); if (done) break; parts.push(value); got += value.byteLength; dl.done += value.byteLength; showDownload(); }
+  } catch (err) { dl.total -= size; dl.done -= got; throw err; }
+  if (!size) dl.total += got;
+  const out = new Uint8Array(got); let o = 0; for (const p of parts) { out.set(p, o); o += p.byteLength; }
+  return out.buffer;
+}
 async function verifiedAsset(url,expected,algorithm="SHA-256") {
   if(!globalThis.crypto?.subtle)throw new Error("A secure browser context is required for integrity checks. Use Chrome or Edge with a local file or localhost.");
-  const variants=[url];
+  const variants=[];
+  if(/^https?:$/.test(location.protocol)) variants.push(new URL("assets/"+url.split("/").pop(),location.href).href);
+  variants.push(url);
   if(url.startsWith("https://cdn.jsdelivr.net/npm/"))variants.push(url.replace("https://cdn.jsdelivr.net/npm/","https://unpkg.com/"));
   if(url===BODY_URL)variants.push("https://raw.githubusercontent.com/organui/skeleton-3d/120fc17278559057b37aff516eee89d263b604c6/public/models/skeleton.glb");
   let last;
   for(const variant of variants)try {
     const response=await fetch(variant,{credentials:"omit",referrerPolicy:"no-referrer",cache:"force-cache"});
     if(!response.ok)throw new Error("Download returned HTTP " + response.status);
-    const bytes=await response.arrayBuffer(), digest=new Uint8Array(await crypto.subtle.digest(algorithm,bytes));
+    const bytes=await readWithProgress(response), digest=new Uint8Array(await crypto.subtle.digest(algorithm,bytes));
     const actual=algorithm==="SHA-384" ? btoa(String.fromCharCode(...digest)) : [...digest].map(x=>x.toString(16).padStart(2,"0")).join("");
     if(actual!==expected)throw new Error("Resource integrity check failed");
     return bytes;
@@ -54684,7 +54703,7 @@ async function loadTrackers() {
   if (trackerPromise) return trackerPromise;
   trackerPromise = (async () => {
     const {vision,files} = await makeRuntime();
-    setStatus("Downloading and checking face, hand and body models…");
+    showDownload();
     // body tracking: the chosen quality first, the other one as a fallback if its download fails
     const order = S.poseq === "lite" ? ["lite", "full"] : ["full", "lite"];
     const poseDownload = (async () => {
@@ -54729,8 +54748,9 @@ async function startCamera(deviceId) {
   try {
     if (!navigator.mediaDevices?.getUserMedia) throw new Error("Camera access is unavailable. Open this page in Chrome or Edge using HTTPS, localhost, or a local file.");
     setStatus("Preparing the 3D engine…"); await boot(); if(token!==generation)return;
-    step = "tracking models"; setStatus("Downloading and verifying the tracking and skeleton models before camera access…");
+    step = "tracking models"; setStatus("Downloading the tracking and anatomy models (first time only; later visits load from the browser's storage)…");
     await Promise.all([loadTrackers(),loadBodyModel()]); if(token!==generation)return;
+    setStatus("Starting the trackers…");
     await lockNetwork(); if(token!==generation)return; step = "camera"; setStatus("Models ready. Allow camera access to start.");
     const constraints={video:deviceId?{deviceId:{exact:deviceId},width:{ideal:1280},height:{ideal:720}}:{facingMode:"user",width:{ideal:1280},height:{ideal:720}},audio:false};
     const next=await navigator.mediaDevices.getUserMedia(constraints);
